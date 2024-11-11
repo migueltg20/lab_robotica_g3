@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 #!/usr/bin/env python
 # Software License Agreement (BSD License)
 #
@@ -54,3 +55,25 @@ if __name__ == '__main__':
         talker()
     except rospy.ROSInterruptException:
         pass
+=======
+#!/usr/bin/env python3
+# license removed for brevity
+import rospy
+from std_msgs.msg import String
+
+def talker():
+    pub = rospy.Publisher('chatter', String, queue_size=10)
+    rospy.init_node('talker', anonymous=True)
+    rate = rospy.Rate(10) # 10hz
+    while not rospy.is_shutdown():
+        hello_str = "hello world %s" % rospy.get_time()
+        rospy.loginfo(hello_str)
+        pub.publish(hello_str)
+        rate.sleep()
+
+if __name__ == '__main__':
+    try:
+        talker()
+    except rospy.ROSInterruptException:
+        pass
+>>>>>>> 22b85e000d1887d45c17e2bf5404d98a4e0cbbd3

@@ -1,0 +1,375 @@
+#!/usr/bin/python3
+# This Python file uses the following encoding: utf-8
+
+import math
+import traceback
+import rospy
+import tf
+import numpy as np
+import geometry_msgs.msg as geo
+from nav_msgs.msg import Odometry
+from visualization_msgs.msg import Marker, MarkerArray
+from std_msgs.msg import Float32
+
+class TurtlebotController():
+    
+    def __init__(self, rate):
+        #Initiliaze node
+        rospy.init_node('TurtlebotController', anonymous=False)
+        rospy.on_shutdown(self.shutdown)
+
+        # Subscribers 
+        rospy.Subscriber("move_base_simple/goal", geo.PoseStamped, self.goal_Callback)
+        rospy.Subscriber("/odom", Odometry, self.state_Callback)
+
+        #Publishers
+        self.cmd_vel_pub = rospy.Publisher("cmd_vel", geo.Twist, queue_size=10)
+        self.vector_pub = rospy.Publisher("visualization_marker", MarkerArray , queue_size=10)
+
+        self.debug_pub = rospy.Publisher("debug", Float32 , queue_size=10)
+
+        #tf listener
+        self.tf_listener = tf.TransformListener()
+
+        # Parameters 
+        self.goal_tol = 0.15
+        self.rate = rospy.Rate(rate) # Hz  (1/Hz = secs)
+        
+        
+        
+        # Initialize internal variables
+        #Trayectory planner
+        self.goal = geo.PoseStamped()           
+        self.goal_received = False
+        self.goal_distance = None
+
+        #State of robot
+        self.pose_odom = geo.PoseStamped()
+        self.pose_base = geo.PoseStamped()
+        self.position = geo.PointStamped()
+        self.orientation_qt = None
+        self.orientation_angle = 0.0
+
+        #Controlador - virtual force field
+        self.goal_transformed = geo.PoseStamped()
+        self.Ft = [0,0,0]                           #Force vector towards goal
+        self.Fr = [0,0,0]                           #Force vector repeling obstacles
+        self.result_position = [0,0,0]              #Resulting vector
+        self.result_angle = 0.0
+        self.target_angle = 0.0
+        self.Max_dist_t = 2                        #m   
+        self.Min_dist_t = 0.5                      #m  
+        self.Ft_max = 1.5                           
+        self.Kt = 1.0               #Proportional parameter for Target force 
+        self.Ft_mag = 0.0
+
+        #Vector to linear and angular velocity
+        self.Vel_max = 0.5      #Max joint velocity (linear + angular)
+        self.vel_ang_max = 3.0
+        self.vel_lin_max = 3.0
+        self.Kv = 1.0
+        self.Kw = 4.0            #Proportional constant for angular velocity [s^-1].      ~=vel_ang_max / max ang(=pi rad)  (= Force saturate signal)
+        self.Tm = 1/rate
+        self.Kd = 1
+        self.result_angle_1 = 0.0
+
+        rospy.loginfo("Turtlebot controller started")
+
+    def shutdown(self):
+        # Stop turtlebot
+        rospy.loginfo("TurtleBot controller is shutting down...")
+
+        self.tf_listener = None  # Stops tf listener
+
+        # A default Twist has linear.x of 0 and angular.z of 0.  So it'll stop TurtleBot
+        self.cmd_vel_pub.publish(geo.Twist())
+        rospy.loginfo("Commanding lv: 0.0, av: 0.0")
+        
+        # Sleep just makes sure TurtleBot receives the stop command prior to shutting down the script
+        rospy.sleep(1)
+
+    def publish(self, lin_vel, ang_vel):
+        move_cmd = geo.Twist()
+
+        move_cmd.linear.x = lin_vel
+        move_cmd.angular.z = ang_vel
+        
+        rospy.loginfo("Commanding lv: %.4f, av: %.4f", lin_vel, ang_vel)
+
+        self.cmd_vel_pub.publish(move_cmd)
+
+    def run(self):
+        # Check if we have received a goal
+        if(self.goal_received == False):
+            rospy.loginfo("Goal not received. Waiting...")
+            return
+
+        # Check if the final goal has been reached
+        if(self.goalReached()==True):
+            rospy.loginfo("GOAL REACHED!!! Stopping!")
+            self.publish(0.0, 0.0)
+            self.goal_received = False
+
+            #Inicialize variables related to last target
+            self.result_position = [0,0,0]
+            self.goal_transformed = geo.PoseStamped()
+            return
+
+        [v_lin,v_ang] = self.virtual_Force_Field()
+
+        rospy.loginfo(f"vel lineal = {v_lin} , vel angular = {v_ang}")
+
+        self.publish(v_lin, v_ang)
+        return
+        
+
+
+    def state_Callback(self,odom_msg):
+        if self.tf_listener is None:
+            rospy.logwarn("Intento de usar tf_listener después del cierre.")
+            return None        
+        
+        #Create a valid PoseStamped message form Odometry info
+
+        self.pose_odom.header.frame_id = "odom" 
+        self.pose_odom.pose = odom_msg.pose.pose            #Pose - position and quaternion orientation
+        
+        try:            
+            self.pose_odom.header.stamp = rospy.Time(0)     #Try with last transform avaible
+            self.pose_base = self.tf_listener.transformPose('base_footprint', self.pose_odom)
+            #(trans, rot) = self.tf_listener.lookupTransform("base_footprint", "odom", rospy.Time(0))        #Look for las transformation avaible 
+
+        #except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
+        except Exception as e: 
+            #err = traceback.format_exc()
+            rospy.logerr(f"Problem TF : {e}")
+            
+        self.position = self.pose_odom.pose.position
+        self.orientation_qt = self.pose_odom.pose.orientation
+
+        #Convert orientation into a list 
+        quaternion = [self.orientation_qt.x , self.orientation_qt.y, self.orientation_qt.z, self.orientation_qt.w]
+
+        try:                                
+            #Transform form quaternion orientation to euler angles
+            orientation_angle_tuple = tf.transformations.euler_from_quaternion(quaternion)
+           
+            self.orientation_angle = orientation_angle_tuple[2] * 180/math.pi   # euler angle yaw == z - degrees
+     
+        except Exception as e:
+            err = traceback.format_exc()
+            rospy.logwarn(f"Problem TF in State Callback qt to euler transformation: {err}")
+        
+
+
+        #Debuging messages - temporal -----
+        #rospy.loginfo(f"Position_odom is x={self.pose_odom.pose.position.x}, y= {self.pose_odom.pose.position.y}, z= {self.pose_odom.pose.position.z} ")
+        #rospy.loginfo(f"Position_base is x={self.pose_base.pose.position.x}, y= {self.pose_base.pose.position.y}, z= {self.pose_base.pose.position.z} ")
+        
+        #-----
+
+
+    def goal_Callback(self,goal_msg):
+        rospy.loginfo("Goal received! x: %.2f, y:%.2f", goal_msg.pose.position.x, goal_msg.pose.position.y)
+        self.goal = goal_msg  
+        self.goal_received = True
+
+    def goalReached(self):
+        # Return True if the FINAL goal was reached, False otherwise
+        if self.goal_received:
+            pose_transformed = geo.PoseStamped()
+
+            # Update the goal timestamp to avoid issues with TF transform
+            self.goal.header.stamp = rospy.Time()
+
+            try:
+                pose_transformed = self.tf_listener.transformPose('base_footprint', self.goal)
+            except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
+                rospy.loginfo("Problem TF")
+                return False                                #if not able to check, return false
+
+            self.goal_distance = math.sqrt(pose_transformed.pose.position.x ** 2 + pose_transformed.pose.position.y ** 2)
+
+            if(self.goal_distance < self.goal_tol):
+                return True
+
+        return False            
+
+
+    def virtual_Force_Field(self):
+        if self.tf_listener is None:
+            rospy.logwarn("Intento de usar tf_listener después del cierre.")
+            return None
+        
+        #---Target vector-------------------
+        try:
+            self.goal_transformed.header.stamp = rospy.Time(0)
+            self.goal_transformed = self.tf_listener.transformPose('base_footprint', self.goal)         #Tranform each time bc robot frame moves
+        except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
+            rospy.loginfo("Problem TF - goal not converted")
+        
+        target = self.goal_transformed.pose.position     #Vector3
+
+        #rospy.loginfo(f", target x = {target.x},target y = {target.y},target z = {target.z}")
+        
+        # Goal orientation
+        #target_qt = [self.goal_transformed.pose.orientation.x, self.goal_transformed.pose.orientation.y, self.goal_transformed.pose.orientation.z, self.goal_transformed.pose.orientation.w]
+        #try:                                
+            #Transform form quaternion orientation to euler angles
+        #    target_angle_tuple = tf.transformations.euler_from_quaternion(target_qt, axes='sxyz')
+        #    self.target_orientation = target_angle_tuple[2]   # euler angle yaw == z rad
+        #    rospy.loginfo(f"Target angle = {self.target_orientation * 180/math.pi}")
+        #except Exception as e:
+        #    err = traceback.format_exc()
+        #    rospy.logwarn(f"Problem TF in target qt to euler transformation: {err}")
+
+        target_scaled = [target.x, target.y, target.z]
+        dist_t = math.sqrt(target.x ** 2 + target.y ** 2 + target.z **2)
+
+        #Saturate max and min distance to target considerate      
+        if dist_t > self.Max_dist_t:                                #Scale vector
+            target_scaled[0] = self.Max_dist_t * (target.x/dist_t) 
+            target_scaled[1] = self.Max_dist_t * (target.y/dist_t)  
+            target_scaled[2] = self.Max_dist_t * (target.z/dist_t)
+
+        if dist_t < self.Min_dist_t: 
+            target_scaled[0] = self.Min_dist_t * (target.x/dist_t) 
+            target_scaled[1] = self.Min_dist_t * (target.y/dist_t)  
+            target_scaled[2] = self.Min_dist_t * (target.z/dist_t)
+        
+        dist_t_escaled = math.sqrt(target_scaled[0] ** 2 + target_scaled[1] ** 2 + target_scaled[2] **2) 
+        # Virtual Force Vector towards target 
+            # Inversely proportional to limited target distance => (Max distance == Min force and Min distance == Max Force)
+        self.Kt = 0.75 #self.Ft_max * self.Min_dist_t           # Ft_min = 1 == kt = 4  and Ft max = 8
+        #self.Ft_mag = self.Kt / dist_t_escaled
+        rospy.loginfo(f"dist t = {dist_t}")
+        self.Ft[0] = self.Kt * (target_scaled[0]/dist_t_escaled)            #Same direction with Force magnitud
+        self.Ft[1] = self.Kt * (target_scaled[1]/dist_t_escaled)  
+        self.Ft[2] = self.Kt * (target_scaled[2]/dist_t_escaled)
+
+        if dist_t < self.Min_dist_t:
+            self.Ft[0] = self.Kt * dist_t**2 * (target_scaled[0]/dist_t_escaled)            #Same direction with Force magnitud
+            self.Ft[1] = self.Kt * dist_t**2 * (target_scaled[1]/dist_t_escaled)  
+            self.Ft[2] = self.Kt * dist_t**2 * (target_scaled[2]/dist_t_escaled)
+
+
+
+        #---Obstacles vector------------------
+
+
+        self.Fr[0] = 0 
+        self.Fr[1] = 0  
+        self.Fr[2] = 0
+
+        #---Result vector---------------------
+        self.result_position[0] = self.Ft[0]  +  self.Fr[0] 
+        self.result_position[1] = self.Ft[1]  +  self.Fr[1]  
+        self.result_position[2] = self.Ft[2]  +  self.Fr[2] 
+
+
+
+
+        self.marker_publish( self.result_position, [target.x, target.y, target.z], target_scaled)
+
+        #rospy.loginfo(f"Resulting vector = [{self.result_position[0]} , {self.result_position[1]}, {self.result_position[2]}]")
+
+        #angle_diff_norm = self.normalize_ang_diff(self.result_angle , 0 )  #Range: [-1,1]             #Angulo del robot respecro a si mismo es nulo
+
+        
+
+        [v_lin,v_ang] = self.vector2vel_cmd(self.result_position)
+
+        return v_lin,v_ang
+
+
+    def vector2vel_cmd(self, vector):
+        # Transform direction vector into linear velocity ang angular velocity
+        # Proportional control for linear velocity
+        v_lin = self.Kv * vector[0]     #Tangencial velocity = X component of result vector 
+                                  
+        # Angle between resulting vector and robot frame (to calculate v ang.) 
+        vector_angle = math.atan2( vector[1] , vector[0])        # Rad. [-pi, pi]
+
+        #rospy.loginfo(f"Result angle = {vector_angle * 180/math.pi}")
+
+        self.debug_pub.publish(vector_angle)
+
+        # PD for angular velocity control
+        v_ang = self.Kw * ( vector_angle/math.pi + self.Kd * (vector_angle - self.result_angle_1) /( self.Tm * math.pi ) ) #rad/s
+        
+        #Saturation
+        if v_ang > self.vel_ang_max:
+            v_ang = self.vel_ang_max
+
+        if v_lin < 0:               #Forbiden going backwards 
+            v_lin = 0.0
+        if v_lin > self.vel_lin_max:             #Max velocity 
+            v_lin = self.vel_lin_max
+        if v_lin < 0.05 and abs(v_ang) >= 0.1:            #If targer only a bit in front, use only ven ang to avoid doing spirals
+            v_lin = 0.0
+
+        #Variable actualization
+        self.result_angle_1 = vector_angle 
+
+        return  [v_lin,v_ang]
+
+    def normalize_ang_diff(self,ang1, ang2):
+        angle_diff = ang1 - ang2
+        angle_diff_norm = (angle_diff + 180)%360 - 180      #Rango garantizado [-180, 180]
+        #angle_diff_norm2 = angle_diff_norm/180              #Rango[-1,1]
+
+        return angle_diff_norm
+
+        
+    def marker_publish(self,Result,Vector1 , Vector2):
+        marker_array = MarkerArray()
+        vectores = np.zeros((3, 3)) 
+        vectores[:3, 0] = Result
+        vectores[:3, 1] = Vector1
+        vectores[:3, 2] = Vector2
+
+        for i in range(3):
+            marker = Marker()
+            marker.header.frame_id = "base_footprint" 
+            marker.header.stamp = rospy.Time.now()
+            marker.ns = "vectores"
+            marker.id = i
+            marker.type = Marker.ARROW
+            marker.action = Marker.ADD
+
+            # Inicial and final points
+            marker.points = [geo.Point(0, 0, 0), geo.Point(vectores[0, i], vectores[1, i], vectores[2, i])] 
+
+            # Color and size of vector
+            marker.scale.x = 0.05  
+            marker.scale.y = 0.1  
+            marker.scale.z = 0.1  
+            if i == 0:
+                marker.color.r = 1.0  
+            if i == 1:
+                marker.color.g = 1.0
+            if i == 2:
+                marker.color.b = 0.0
+            marker.color.a = 1.0  # Opacidad
+
+            marker_array.markers.append(marker)     #Add vector to Vector Array
+        
+        self.vector_pub.publish(marker_array)
+
+if __name__ == '__main__':
+    rate = 20 # Frecuency (Hz) for commanding the robot
+    controller = TurtlebotController(rate)
+    r = rospy.Rate(rate)
+
+    while not (rospy.is_shutdown()):
+        try: 
+            controller.run()
+
+        except rospy.ROSInterruptException:
+            pass
+        except Exception as e:
+            err = traceback.format_exc()
+            rospy.logerr(f"Error inesperado: {err}")
+
+         # Wait for 0.1 seconds (10 HZ) and publish again
+        r.sleep()

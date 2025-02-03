@@ -1,0 +1,2 @@
+autonomous_navigation
+-DCATKIN_DEVEL_PREFIX=/home/lab_rob_shared/lab_robotica_g3/ros/ros_workspace/devel -DCMAKE_INSTALL_PREFIX=/home/lab_rob_shared/lab_robotica_g3/ros/ros_workspace/install -G Unix Makefiles

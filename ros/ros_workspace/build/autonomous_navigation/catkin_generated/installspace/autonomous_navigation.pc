@@ -1,0 +1,8 @@
+prefix=/home/lab_rob_shared/lab_robotica_g3/ros/ros_workspace/install
+
+Name: autonomous_navigation
+Description: Description of autonomous_navigation
+Version: 0.0.0
+Cflags: 
+Libs: -L${prefix}/lib 
+Requires: 

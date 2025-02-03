@@ -1,0 +1,2 @@
+- setup-file:
+    local-name: /home/lab_rob_shared/lab_robotica_g3/ros/ros_workspace/install/setup.sh

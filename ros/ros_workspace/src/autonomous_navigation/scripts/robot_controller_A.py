@@ -2,12 +2,14 @@
 # This Python file uses the following encoding: utf-8
 
 import math
+import numpy as np
 import traceback
 import rospy
 import tf
-import numpy as np
+
 import geometry_msgs.msg as geo
 from nav_msgs.msg import Odometry
+from nav_msgs.msg import Path
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import Float32
 
@@ -19,29 +21,32 @@ class TurtlebotController():
         rospy.on_shutdown(self.shutdown)
 
         # Subscribers 
-        rospy.Subscriber("move_base_simple/goal", geo.PoseStamped, self.goal_Callback)
+        #rospy.Subscriber("move_base_simple/goal", geo.PoseStamped, self.goal_Callback)                 #Not compatible with path_Callback
+        rospy.Subscriber('path', Path ,self.path_Callback)
         rospy.Subscriber("/odom", Odometry, self.state_Callback)
 
         #Publishers
         self.cmd_vel_pub = rospy.Publisher("cmd_vel", geo.Twist, queue_size=10)
         self.vector_pub = rospy.Publisher("visualization_marker", MarkerArray , queue_size=10)
-
         self.debug_pub = rospy.Publisher("debug", Float32 , queue_size=10)
 
         #tf listener
         self.tf_listener = tf.TransformListener()
 
         # Parameters 
-        self.goal_tol = 0.15
+        self.goal_tol = 0.25                                    #0.15
         self.rate = rospy.Rate(rate) # Hz  (1/Hz = secs)
-        
         
         
         # Initialize internal variables
         #Trayectory planner
-        self.goal = geo.PoseStamped()           
+        self.path = Path()
+        self.goal = geo.PoseStamped()                   #Actual goal 
         self.goal_received = False
         self.goal_distance = None
+        self.final_goal = False                         
+        self.num_points = 0.0
+        self.num_act_point = 0                          #keep track of actual point within path
 
         #State of robot
         self.pose_odom = geo.PoseStamped()
@@ -105,38 +110,45 @@ class TurtlebotController():
 
         # Check if the final goal has been reached
         if(self.goalReached()==True):
-            rospy.loginfo("GOAL REACHED!!! Stopping!")
-            self.publish(0.0, 0.0)
-            self.goal_received = False
+            if self.final_goal == True:
+                rospy.loginfo("GOAL REACHED!!! Stopping!")
+                self.publish(0.0, 0.0)
+                self.goal_received = False
 
-            #Inicialize variables related to last target
-            self.result_position = [0,0,0]
-            self.goal_transformed = geo.PoseStamped()
-            return
+                #Inicialize variables related to last target
+                self.result_position = [0,0,0]
+                self.goal_transformed = geo.PoseStamped()
+                self.path = Path()
+                self.final_goal = False
+                self.num_points = 0
+                self.num_act_point = 0 
+                return
+            else:                           #Reach an intermediate point
+                rospy.loginfo("Arrived to intermediate point, giving next goal")
+                self.num_act_point = self.num_act_point + 1
+
+                if self.num_act_point == self.num_points - 1:                        
+                    self.final_goal = True
+
+                self.goal_Callback(self.path.poses[self.num_act_point])
+                      
 
         [v_lin,v_ang] = self.virtual_Force_Field()
-
-        rospy.loginfo(f"vel lineal = {v_lin} , vel angular = {v_ang}")
 
         self.publish(v_lin, v_ang)
         return
         
-
-
     def state_Callback(self,odom_msg):
         if self.tf_listener is None:
             rospy.logwarn("Intento de usar tf_listener después del cierre.")
             return None        
         
-        #Create a valid PoseStamped message form Odometry info
-
         self.pose_odom.header.frame_id = "odom" 
         self.pose_odom.pose = odom_msg.pose.pose            #Pose - position and quaternion orientation
         
         try:            
             self.pose_odom.header.stamp = rospy.Time(0)     #Try with last transform avaible
             self.pose_base = self.tf_listener.transformPose('base_footprint', self.pose_odom)
-            #(trans, rot) = self.tf_listener.lookupTransform("base_footprint", "odom", rospy.Time(0))        #Look for las transformation avaible 
 
         #except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
         except Exception as e: 
@@ -148,24 +160,32 @@ class TurtlebotController():
 
         #Convert orientation into a list 
         quaternion = [self.orientation_qt.x , self.orientation_qt.y, self.orientation_qt.z, self.orientation_qt.w]
-
         try:                                
             #Transform form quaternion orientation to euler angles
             orientation_angle_tuple = tf.transformations.euler_from_quaternion(quaternion)
-           
             self.orientation_angle = orientation_angle_tuple[2] * 180/math.pi   # euler angle yaw == z - degrees
-     
+
         except Exception as e:
             err = traceback.format_exc()
             rospy.logwarn(f"Problem TF in State Callback qt to euler transformation: {err}")
-        
 
+    def path_Callback(self, path_msg):
+        #Dealing with path message received:
+        if path_msg.poses == self.path.poses:                       #do nothing if path recieved is the same 
+            return
+        rospy.loginfo("Path received!")
+        self.goal_received = True
+        self.num_points = len(path_msg.poses)
+        self.path = path_msg
 
-        #Debuging messages - temporal -----
-        #rospy.loginfo(f"Position_odom is x={self.pose_odom.pose.position.x}, y= {self.pose_odom.pose.position.y}, z= {self.pose_odom.pose.position.z} ")
-        #rospy.loginfo(f"Position_base is x={self.pose_base.pose.position.x}, y= {self.pose_base.pose.position.y}, z= {self.pose_base.pose.position.z} ")
-        
-        #-----
+        if self.num_points  == 1:
+            self.final_goal = True
+        else:
+            self.final_goal = False  
+
+        self.num_act_point = 0
+
+        self.goal_Callback(self.path.poses[0])
 
 
     def goal_Callback(self,goal_msg):
@@ -173,8 +193,12 @@ class TurtlebotController():
         self.goal = goal_msg  
         self.goal_received = True
 
+        if self.path == Path():                     # Set goal manually not compatible unless no path received
+            self.final_goal = True
+
+    
     def goalReached(self):
-        # Return True if the FINAL goal was reached, False otherwise
+        # Return True if the actual goal was reached, False otherwise
         if self.goal_received:
             pose_transformed = geo.PoseStamped()
 
@@ -241,12 +265,13 @@ class TurtlebotController():
             # Inversely proportional to limited target distance => (Max distance == Min force and Min distance == Max Force)
         self.Kt = 0.75 #self.Ft_max * self.Min_dist_t           # Ft_min = 1 == kt = 4  and Ft max = 8
         #self.Ft_mag = self.Kt / dist_t_escaled
-        rospy.loginfo(f"dist t = {dist_t}")
+        #rospy.loginfo(f"dist t = {dist_t}")
         self.Ft[0] = self.Kt * (target_scaled[0]/dist_t_escaled)            #Same direction with Force magnitud
         self.Ft[1] = self.Kt * (target_scaled[1]/dist_t_escaled)  
         self.Ft[2] = self.Kt * (target_scaled[2]/dist_t_escaled)
 
-        if dist_t < self.Min_dist_t:
+        #Decrease force close to goal to allow full stop in final goal
+        if self.final_goal == True and dist_t < self.Min_dist_t:                
             self.Ft[0] = self.Kt * dist_t**2 * (target_scaled[0]/dist_t_escaled)            #Same direction with Force magnitud
             self.Ft[1] = self.Kt * dist_t**2 * (target_scaled[1]/dist_t_escaled)  
             self.Ft[2] = self.Kt * dist_t**2 * (target_scaled[2]/dist_t_escaled)

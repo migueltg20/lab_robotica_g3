@@ -12,8 +12,11 @@ from nav_msgs.msg import Odometry
 from nav_msgs.msg import Path
 from visualization_msgs.msg import Marker, MarkerArray
 from std_msgs.msg import Float32
+from autonomous_navigation.msg import Vector3Array
 
 class TurtlebotController():
+    '''This class contains a module of control which follows a trayectory and avoids obstables 
+        using its own version of the VFF (Virtual Force Field) algorithm '''
     
     def __init__(self, rate):
         #Initiliaze node
@@ -21,9 +24,10 @@ class TurtlebotController():
         rospy.on_shutdown(self.shutdown)
 
         # Subscribers 
-        #rospy.Subscriber("move_base_simple/goal", geo.PoseStamped, self.goal_Callback)                 #Not compatible with path_Callback
+        rospy.Subscriber("move_base_simple/goal", geo.PoseStamped, self.goal_Callback)                 #Not compatible while following a path
         rospy.Subscriber('path', Path ,self.path_Callback)
         rospy.Subscriber("/odom", Odometry, self.state_Callback)
+        rospy.Subscriber("/obstacles", Vector3Array, self.obstacle_Callback)
 
         #Publishers
         self.cmd_vel_pub = rospy.Publisher("cmd_vel", geo.Twist, queue_size=10)
@@ -62,11 +66,18 @@ class TurtlebotController():
         self.result_position = [0,0,0]              #Resulting vector
         self.result_angle = 0.0
         self.target_angle = 0.0
-        self.Max_dist_t = 2                        #m   
-        self.Min_dist_t = 0.5                      #m  
+        self.Max_dist_t = 2                         #m   
+        self.Min_dist_t = 0.5                       #m  
         self.Ft_max = 1.5                           
-        self.Kt = 1.0               #Proportional parameter for Target force 
+        self.Kt = 0.75                               #Proportional parameter for Target force 
         self.Ft_mag = 0.0
+        
+        #Obstacles
+        self.obstacles = Vector3Array()
+        self.num_obs = 0.0
+        self.Kr = 0.05
+        self.save_distance = 0.5
+        self.max_Fr = 8.0
 
         #Vector to linear and angular velocity
         self.vel_ang_max = 3.0
@@ -93,6 +104,7 @@ class TurtlebotController():
         rospy.sleep(1)
 
     def publish(self, lin_vel, ang_vel):
+        #Publish given velocities to /cmd_vel topic to send it to the robot
         move_cmd = geo.Twist()
 
         move_cmd.linear.x = lin_vel
@@ -137,7 +149,57 @@ class TurtlebotController():
 
         self.publish(v_lin, v_ang)
         return
-        
+
+    #Functions for Goal management --------------------------------
+
+    def goal_Callback(self,goal_msg):
+        rospy.loginfo("Goal received! x: %.2f, y:%.2f", goal_msg.pose.position.x, goal_msg.pose.position.y)
+        self.goal = goal_msg  
+        self.goal_received = True
+
+        if self.path == Path():                     # Set goal manually not compatible unless no path received
+            self.final_goal = True
+    
+    def goalReached(self):
+        # Return True if the actual goal was reached, False otherwise
+        if self.goal_received:
+            pose_transformed = geo.PoseStamped()
+
+            # Update the goal timestamp to avoid issues with TF transform
+            self.goal.header.stamp = rospy.Time()
+
+            try:
+                pose_transformed = self.tf_listener.transformPose('base_footprint', self.goal)
+            except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
+                rospy.loginfo("Problem TF")
+                return False                                #if not able to check, return false
+
+            self.goal_distance = math.sqrt(pose_transformed.pose.position.x ** 2 + pose_transformed.pose.position.y ** 2)
+
+            if(self.goal_distance < self.goal_tol):
+                return True
+
+        return False            
+
+    def path_Callback(self, path_msg):
+        #Dealing with path message received:
+        if path_msg.poses == self.path.poses:                       #do nothing if path recieved is the same 
+            return
+        rospy.loginfo("Path received!")
+        self.goal_received = True
+        self.num_points = len(path_msg.poses)
+        self.path = path_msg
+
+        if self.num_points  == 1:
+            self.final_goal = True
+        else:
+            self.final_goal = False  
+
+        self.num_act_point = 0
+
+        self.goal_Callback(self.path.poses[0])
+
+    #Other callback functions for subcribed topics --------------------------------        
     def state_Callback(self,odom_msg):
         if self.tf_listener is None:
             rospy.logwarn("Intento de usar tf_listener después del cierre.")
@@ -169,56 +231,34 @@ class TurtlebotController():
             err = traceback.format_exc()
             rospy.logwarn(f"Problem TF in State Callback qt to euler transformation: {err}")
 
-    def path_Callback(self, path_msg):
-        #Dealing with path message received:
-        if path_msg.poses == self.path.poses:                       #do nothing if path recieved is the same 
-            return
-        rospy.loginfo("Path received!")
-        self.goal_received = True
-        self.num_points = len(path_msg.poses)
-        self.path = path_msg
 
-        if self.num_points  == 1:
-            self.final_goal = True
-        else:
-            self.final_goal = False  
+    def obstacle_Callback(self,obs_msg):
+        ''' Recibe obstacles' positions refered to 'base_footprint' frame as a array of 'geo.Vector3' messages'''
+        self.obstacles = obs_msg
+        self.num_obs = len(self.obstacles.vectors)
 
-        self.num_act_point = 0
+        #debuging -- temporal
+        rospy.loginfo(f"Obstacles received : {len(self.obstacles.vectors)}")
 
-        self.goal_Callback(self.path.poses[0])
+        obs_matriz = np.zeros((self.num_obs, 3))      # Matriz de vectores normalizados
+        obs_dist = np.zeros(self.num_obs)             # Distancias de los obstáculos
+        F = np.zeros((self.num_obs, 3))               # Fuerza repulsiva para cada obstáculo
 
+        # Save normalized vectors:
+        for i in range(self.num_obs):
+            #get position vector of obstacle
+            v = self.obstacles.vectors[i]  
+            # Calculate distance
+            obs_dist[i] = math.sqrt(v.x**2 + v.y**2 + v.z**2) 
+            #Normalize vector
+            if obs_dist[i] > 0:  # Avoid division by zero
+                obs_matriz[i] = np.array([v.x, v.y, v.z])
 
-    def goal_Callback(self,goal_msg):
-        rospy.loginfo("Goal received! x: %.2f, y:%.2f", goal_msg.pose.position.x, goal_msg.pose.position.y)
-        self.goal = goal_msg  
-        self.goal_received = True
+        #self.marker_publish( [0,0,0], [0,0,0],[0,0,0], obs_matriz)
 
-        if self.path == Path():                     # Set goal manually not compatible unless no path received
-            self.final_goal = True
+        #temporal
 
-    
-    def goalReached(self):
-        # Return True if the actual goal was reached, False otherwise
-        if self.goal_received:
-            pose_transformed = geo.PoseStamped()
-
-            # Update the goal timestamp to avoid issues with TF transform
-            self.goal.header.stamp = rospy.Time()
-
-            try:
-                pose_transformed = self.tf_listener.transformPose('base_footprint', self.goal)
-            except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
-                rospy.loginfo("Problem TF")
-                return False                                #if not able to check, return false
-
-            self.goal_distance = math.sqrt(pose_transformed.pose.position.x ** 2 + pose_transformed.pose.position.y ** 2)
-
-            if(self.goal_distance < self.goal_tol):
-                return True
-
-        return False            
-
-
+    # VFF implementation --------------------------------
     def virtual_Force_Field(self):
         if self.tf_listener is None:
             rospy.logwarn("Intento de usar tf_listener después del cierre.")
@@ -242,7 +282,7 @@ class TurtlebotController():
         #    target_angle_tuple = tf.transformations.euler_from_quaternion(target_qt, axes='sxyz')
         #    self.target_orientation = target_angle_tuple[2]   # euler angle yaw == z rad
         #    rospy.loginfo(f"Target angle = {self.target_orientation * 180/math.pi}")
-        #except Exception as e:
+        #except Exception as e:'
         #    err = traceback.format_exc()
         #    rospy.logwarn(f"Problem TF in target qt to euler transformation: {err}")
 
@@ -263,9 +303,9 @@ class TurtlebotController():
         dist_t_escaled = math.sqrt(target_scaled[0] ** 2 + target_scaled[1] ** 2 + target_scaled[2] **2) 
         # Virtual Force Vector towards target 
             # Inversely proportional to limited target distance => (Max distance == Min force and Min distance == Max Force)
-        self.Kt = 0.75 #self.Ft_max * self.Min_dist_t           # Ft_min = 1 == kt = 4  and Ft max = 8
+         #self.Ft_max * self.Min_dist_t           # Ft_min = 1 == kt = 4  and Ft max = 8
         #self.Ft_mag = self.Kt / dist_t_escaled
-        #rospy.loginfo(f"dist t = {dist_t}")
+
         self.Ft[0] = self.Kt * (target_scaled[0]/dist_t_escaled)            #Same direction with Force magnitud
         self.Ft[1] = self.Kt * (target_scaled[1]/dist_t_escaled)  
         self.Ft[2] = self.Kt * (target_scaled[2]/dist_t_escaled)
@@ -280,26 +320,46 @@ class TurtlebotController():
 
         #---Obstacles vector------------------
 
+        obs_matriz = np.zeros((self.num_obs, 3))      # Matrix with the normalized vectors
+        obs_dist = np.zeros(self.num_obs)             # Distances to obstacles
+        F = np.zeros((self.num_obs, 3))               # Repulsive force for each obstacle
 
-        self.Fr[0] = 0 
-        self.Fr[1] = 0  
-        self.Fr[2] = 0
+        # Save normalized vectors:
+        for i in range(self.num_obs):
+            #get position vector of obstacle
+            v = self.obstacles.vectors[i]  
+            # Calculate distance
+            obs_dist[i] = math.sqrt(v.x**2 + v.y**2 + v.z**2) 
+            #Normalize vector
+            if obs_dist[i] > 0:  # Avoid division by zero
+                obs_matriz[i] = np.array([v.x, v.y, v.z])/obs_dist[i]
+
+                #Calculated repulsive force for each obstacle
+                if obs_dist[i] > self.save_distance:                    #ignore obstacles outside save distance
+                    F[i] = [0,0,0]
+                    continue
+
+                if obs_matriz[i][0] < 0:                                #ignore obstacles behind robot
+                    F[i] = [0,0,0]
+                    continue
+
+                F[i] = - (self.Kr / obs_dist[i]) * obs_matriz[i]
+
+                if np.linalg.norm(F[i]) > self.max_Fr :                 # Saturate max force
+                    F[i] = self.max_Fr * obs_matriz[i]
+
+        #Resultant repulsive force is the sum of all obstacles forces
+        self.Fr  = np.sum(F, axis=0)
 
         #---Result vector---------------------
-        self.result_position[0] = self.Ft[0]  +  self.Fr[0] 
-        self.result_position[1] = self.Ft[1]  +  self.Fr[1]  
-        self.result_position[2] = self.Ft[2]  +  self.Fr[2] 
+        self.result_position[0] = self.Ft[0]  #+  self.Fr[0] 
+        self.result_position[1] = self.Ft[1]  #+  self.Fr[1]  
+        self.result_position[2] = self.Ft[2]  #+  self.Fr[2] 
 
 
 
-
-        self.marker_publish( self.result_position, [target.x, target.y, target.z], target_scaled)
-
-        #rospy.loginfo(f"Resulting vector = [{self.result_position[0]} , {self.result_position[1]}, {self.result_position[2]}]")
-
-        #angle_diff_norm = self.normalize_ang_diff(self.result_angle , 0 )  #Range: [-1,1]             #Angulo del robot respecro a si mismo es nulo
-
-        
+        #Visualize vector in rviz:
+        self.marker_publish( self.result_position, [target.x, target.y, target.z], target_scaled, obs_matriz )
 
         [v_lin,v_ang] = self.vector2vel_cmd(self.result_position)
 
@@ -337,6 +397,7 @@ class TurtlebotController():
 
         return  [v_lin,v_ang]
 
+    #NOT NECESSARY BECAUSE ANGLE CALCULATED ALREADY IN [-180,180] RANGE
     def normalize_ang_diff(self,ang1, ang2):
         angle_diff = ang1 - ang2
         angle_diff_norm = (angle_diff + 180)%360 - 180      #Rango garantizado [-180, 180]
@@ -344,15 +405,23 @@ class TurtlebotController():
 
         return angle_diff_norm
 
-        
-    def marker_publish(self,Result,Vector1 , Vector2):
+    #Publish vectors to visualize 
+    def marker_publish(self, Vector1, Vector2 , Vector3, Matriz):
         marker_array = MarkerArray()
-        vectores = np.zeros((3, 3)) 
-        vectores[:3, 0] = Result
-        vectores[:3, 1] = Vector1
-        vectores[:3, 2] = Vector2
 
-        for i in range(3):
+        wide = 3 + len(Matriz)
+        vectores = np.zeros((3, wide)) 
+
+        vectores[:3, 0] = Vector1                # Blue vector = Result vector
+        vectores[:3, 1] = Vector2                # Purple vector = Real target
+        vectores[:3, 2] = Vector3                # Green Vector = Target Force
+
+        #Tranform matriz into last colums of vectores
+        m = np.array(Matriz).T
+        for j in range(0,wide-4):
+            vectores[:,j+3] = m[:,j]             # Red Vectors = obstacles
+
+        for i in range(vectores.shape[1]):      #For each column:
             marker = Marker()
             marker.header.frame_id = "base_footprint" 
             marker.header.stamp = rospy.Time.now()
@@ -361,7 +430,7 @@ class TurtlebotController():
             marker.type = Marker.ARROW
             marker.action = Marker.ADD
 
-            # Inicial and final points
+            # Inicial and final points      (All vectors start in robot position)
             marker.points = [geo.Point(0, 0, 0), geo.Point(vectores[0, i], vectores[1, i], vectores[2, i])] 
 
             # Color and size of vector
@@ -369,18 +438,23 @@ class TurtlebotController():
             marker.scale.y = 0.1  
             marker.scale.z = 0.1  
             if i == 0:
-                marker.color.r = 1.0  
+                marker.color.b = 1.0    #Blue
             if i == 1:
-                marker.color.g = 1.0
+                marker.color.b = 1.0    #Purple
+                marker.color.r = 1.0
             if i == 2:
-                marker.color.b = 0.0
-            marker.color.a = 1.0  # Opacidad
+                marker.color.g = 1.0    #Green
+            else:
+                marker.color.r = 1.0    #red
+
+            marker.color.a = 1.0  # Opacity
 
             marker_array.markers.append(marker)     #Add vector to Vector Array
         
         self.vector_pub.publish(marker_array)
 
 if __name__ == '__main__':
+    ''' Create controller instance and run periodically'''
     rate = 20 # Frecuency (Hz) for commanding the robot
     controller = TurtlebotController(rate)
     r = rospy.Rate(rate)
@@ -388,12 +462,8 @@ if __name__ == '__main__':
     while not (rospy.is_shutdown()):
         try: 
             controller.run()
-
-        except rospy.ROSInterruptException:
-            pass
         except Exception as e:
             err = traceback.format_exc()
             rospy.logerr(f"Error inesperado: {err}")
 
-         # Wait for 0.1 seconds (10 HZ) and publish again
         r.sleep()

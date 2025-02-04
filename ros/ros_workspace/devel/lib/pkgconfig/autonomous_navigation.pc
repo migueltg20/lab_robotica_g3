@@ -3,6 +3,6 @@ prefix=/home/lab_rob_shared/lab_robotica_g3/ros/ros_workspace/devel
 Name: autonomous_navigation
 Description: Description of autonomous_navigation
 Version: 0.0.0
-Cflags: 
+Cflags: -I/home/lab_rob_shared/lab_robotica_g3/ros/ros_workspace/devel/include
 Libs: -L${prefix}/lib 
 Requires: 

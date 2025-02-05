@@ -1,0 +1,8 @@
+<launch>
+    <!-- Launch controller -->
+	<node name="robot_controller" pkg="autonomous_navigation" type="robot_controller_A.py" />
+
+    <!--Launch obstacle's detector -->
+    <node name="obstacle_detection" pkg="autonomous_navigation" type="obstacle_detection.py" />
+
+</launch>

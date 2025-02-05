@@ -73,9 +73,8 @@ class TurtlebotController():
         #Obstacles
         self.obstacles = Vector3Array()
         self.num_obs = 0
-        self.Kr = 0.05
-        self.save_distance = 0.5
-        self.max_Fr = 8.0
+        self.Kr = 0.1
+        self.max_Fr = 4.0
 
         #Vector to linear and angular velocity
         self.vel_ang_max = 3.0
@@ -239,26 +238,7 @@ class TurtlebotController():
         self.obstacles = obs_msg
         self.num_obs = int(len(self.obstacles.vectors))
 
-        #debuging -- temporal
         rospy.loginfo(f"Obstacles received : {len(self.obstacles.vectors)}")
-
-        obs_matriz = np.zeros((self.num_obs, 3))      # Matriz de vectores normalizados
-        obs_dist = np.zeros(self.num_obs)             # Distancias de los obstáculos
-        F = np.zeros((self.num_obs, 3))               # Fuerza repulsiva para cada obstáculo
-
-        # Save normalized vectors:
-        for i in range(self.num_obs):
-            #get position vector of obstacle
-            v = self.obstacles.vectors[i]  
-            # Calculate distance
-            obs_dist[i] = math.sqrt(v.x**2 + v.y**2 + v.z**2) 
-            #Normalize vector
-            if obs_dist[i] > 0:  # Avoid division by zero
-                obs_matriz[i] = np.array([v.x, v.y, v.z])
-
-        #self.marker_publish( [0,0,0], [0,0,0],[0,0,0], obs_matriz)
-
-        #temporal
 
     # VFF implementation --------------------------------
     def virtual_Force_Field(self):
@@ -311,40 +291,32 @@ class TurtlebotController():
 
         # Save normalized vectors:
         for i in range(self.num_obs):
-            #get position vector of obstacle
+            #get position vector of obstacle    (modified into 2d space)
             v = self.obstacles.vectors[i]  
             # Calculate distance
-            obs_dist[i] = math.sqrt(v.x**2 + v.y**2 + v.z**2) 
+            obs_dist[i] = math.sqrt(v.x**2 + v.y**2 ) 
             #Normalize vector
             if obs_dist[i] > 0:  # Avoid division by zero
-                obs_matriz[i] = np.array([v.x, v.y, v.z])/obs_dist[i]
-
-                #Calculated repulsive force for each obstacle
-                if obs_dist[i] > self.save_distance:                    #ignore obstacles outside save distance
-                    F[i] = [0,0,0]
-                    continue
-
-                if obs_matriz[i][0] < 0:                                #ignore obstacles behind robot
-                    F[i] = [0,0,0]
-                    continue
+                obs_matriz[i] = np.array([v.x, v.y, 0])/obs_dist[i]
 
                 F[i] = - (self.Kr / obs_dist[i]) * obs_matriz[i]
 
                 if np.linalg.norm(F[i]) > self.max_Fr :                 # Saturate max force
                     F[i] = self.max_Fr * obs_matriz[i]
 
-        #Resultant repulsive force is the sum of all obstacles forces
+        #Total repulsive force is the sum of all obstacles forces
         self.Fr  = np.sum(F, axis=0)
 
         #---Result vector---------------------
-        self.result_position[0] = self.Ft[0]  #+  self.Fr[0] 
-        self.result_position[1] = self.Ft[1]  #+  self.Fr[1]  
-        self.result_position[2] = self.Ft[2]  #+  self.Fr[2] 
+        self.result_position[0] = self.Ft[0]  +  self.Fr[0] 
+        self.result_position[1] = self.Ft[1]  +  self.Fr[1]  
+        self.result_position[2] = self.Ft[2]  +  self.Fr[2] 
 
 
 
         #Visualize vector in rviz:
-        self.marker_publish( self.result_position, [target.x, target.y, target.z], self.Ft , obs_matriz )
+        #self.marker_publish( self.result_position, [target.x, target.y, target.z], self.Ft , F )
+        self.marker_publish( self.result_position, [0,0,0], self.Ft , F )
 
         [v_lin,v_ang] = self.vector2vel_cmd(self.result_position)
 
@@ -426,8 +398,8 @@ class TurtlebotController():
             if i == 0:
                 marker.color.b = 1.0    #Blue
             if i == 1:
-                marker.color.b = 1.0    #Purple
-                marker.color.r = 1.0
+                marker.color.b = 0.5    #Purple
+                marker.color.r = 0.5
             if i == 2:
                 marker.color.g = 1.0    #Green
             else:

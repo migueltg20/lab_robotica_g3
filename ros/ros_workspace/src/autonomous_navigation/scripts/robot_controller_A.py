@@ -312,12 +312,6 @@ class TurtlebotController():
 
         #rospy.loginfo(f"Result angle = {vector_angle * 180/math.pi}")   
 
-        #Avoid sudden changes of sign around +-180º by keeping last direction  -  Implementation not finished
-        #if abs(vector_angle) > 1 - 0.1 :
-        #    if abs(vector_angle - self.result_angle_1) > 1:
-        #        vector_angle = self.result_angle_1
-        #        rospy.loginfo("Correcting +-180º singularity")
-
         self.debug_pub.publish(vector_angle)
 
         #PD for angular velocity control

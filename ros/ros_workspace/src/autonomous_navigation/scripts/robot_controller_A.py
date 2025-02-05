@@ -24,8 +24,8 @@ class TurtlebotController():
         rospy.on_shutdown(self.shutdown)
 
         # Subscribers 
-        rospy.Subscriber("move_base_simple/goal", geo.PoseStamped, self.goal_Callback)                 #Not compatible while following a path
-        rospy.Subscriber('path', Path ,self.path_Callback)
+        rospy.Subscriber("/move_base_simple/goal", geo.PoseStamped, self.goal_Callback)                 #Not compatible while following a path
+        rospy.Subscriber('/path', Path ,self.path_Callback)
         rospy.Subscriber("/odom", Odometry, self.state_Callback)
         rospy.Subscriber("/obstacles", Vector3Array, self.obstacle_Callback)
 
@@ -38,7 +38,8 @@ class TurtlebotController():
         self.tf_listener = tf.TransformListener()
 
         # Parameters 
-        self.goal_tol = 0.25                                    #0.15
+        self.goal_tol = 0.25                        #m
+        self.goal_tol_final = 0.15                                 
         self.rate = rospy.Rate(rate) # Hz  (1/Hz = secs)
         
         
@@ -64,17 +65,14 @@ class TurtlebotController():
         self.Ft = [0,0,0]                           #Force vector towards goal
         self.Fr = [0,0,0]                           #Force vector repeling obstacles
         self.result_position = [0,0,0]              #Resulting vector
-        self.result_angle = 0.0
-        self.target_angle = 0.0
-        self.Max_dist_t = 2                         #m   
-        self.Min_dist_t = 0.5                       #m  
-        self.Ft_max = 1.5                           
-        self.Kt = 0.75                               #Proportional parameter for Target force 
+        self.target_angle = 0.0         
+        self.Min_dist_t = 0.5              
+        self.Kt = 0.75     #0.75                       #Constant value for Target force 
         self.Ft_mag = 0.0
         
         #Obstacles
         self.obstacles = Vector3Array()
-        self.num_obs = 0.0
+        self.num_obs = 0
         self.Kr = 0.05
         self.save_distance = 0.5
         self.max_Fr = 8.0
@@ -85,8 +83,9 @@ class TurtlebotController():
         self.Kv = 1.0
         self.Kw = 4.0            #Proportional constant for angular velocity [s^-1].      ~=vel_ang_max / max ang(=pi rad)  (= Force saturate signal)
         self.Tm = 1/rate
-        self.Kd = 1
+        self.Kd = 0.75
         self.result_angle_1 = 0.0
+
 
         rospy.loginfo("Turtlebot controller started")
 
@@ -176,9 +175,12 @@ class TurtlebotController():
 
             self.goal_distance = math.sqrt(pose_transformed.pose.position.x ** 2 + pose_transformed.pose.position.y ** 2)
 
-            if(self.goal_distance < self.goal_tol):
-                return True
-
+            if self.final_goal == True: 
+                if(self.goal_distance < self.goal_tol_final):
+                    return True
+            else:
+                if(self.goal_distance < self.goal_tol):
+                    return True
         return False            
 
     def path_Callback(self, path_msg):
@@ -235,7 +237,7 @@ class TurtlebotController():
     def obstacle_Callback(self,obs_msg):
         ''' Recibe obstacles' positions refered to 'base_footprint' frame as a array of 'geo.Vector3' messages'''
         self.obstacles = obs_msg
-        self.num_obs = len(self.obstacles.vectors)
+        self.num_obs = int(len(self.obstacles.vectors))
 
         #debuging -- temporal
         rospy.loginfo(f"Obstacles received : {len(self.obstacles.vectors)}")
@@ -285,36 +287,19 @@ class TurtlebotController():
         #except Exception as e:'
         #    err = traceback.format_exc()
         #    rospy.logwarn(f"Problem TF in target qt to euler transformation: {err}")
-
-        target_scaled = [target.x, target.y, target.z]
+        #disctance to target
         dist_t = math.sqrt(target.x ** 2 + target.y ** 2 + target.z **2)
 
-        #Saturate max and min distance to target considerate      
-        if dist_t > self.Max_dist_t:                                #Scale vector
-            target_scaled[0] = self.Max_dist_t * (target.x/dist_t) 
-            target_scaled[1] = self.Max_dist_t * (target.y/dist_t)  
-            target_scaled[2] = self.Max_dist_t * (target.z/dist_t)
-
-        if dist_t < self.Min_dist_t: 
-            target_scaled[0] = self.Min_dist_t * (target.x/dist_t) 
-            target_scaled[1] = self.Min_dist_t * (target.y/dist_t)  
-            target_scaled[2] = self.Min_dist_t * (target.z/dist_t)
-        
-        dist_t_escaled = math.sqrt(target_scaled[0] ** 2 + target_scaled[1] ** 2 + target_scaled[2] **2) 
         # Virtual Force Vector towards target 
-            # Inversely proportional to limited target distance => (Max distance == Min force and Min distance == Max Force)
-         #self.Ft_max * self.Min_dist_t           # Ft_min = 1 == kt = 4  and Ft max = 8
-        #self.Ft_mag = self.Kt / dist_t_escaled
-
-        self.Ft[0] = self.Kt * (target_scaled[0]/dist_t_escaled)            #Same direction with Force magnitud
-        self.Ft[1] = self.Kt * (target_scaled[1]/dist_t_escaled)  
-        self.Ft[2] = self.Kt * (target_scaled[2]/dist_t_escaled)
+        self.Ft[0] = self.Kt * (target.x/dist_t)            #Same direction with constan magnitud
+        self.Ft[1] = self.Kt * (target.y/dist_t)  
+        self.Ft[2] = self.Kt * (target.z/dist_t)
 
         #Decrease force close to goal to allow full stop in final goal
         if self.final_goal == True and dist_t < self.Min_dist_t:                
-            self.Ft[0] = self.Kt * dist_t**2 * (target_scaled[0]/dist_t_escaled)            #Same direction with Force magnitud
-            self.Ft[1] = self.Kt * dist_t**2 * (target_scaled[1]/dist_t_escaled)  
-            self.Ft[2] = self.Kt * dist_t**2 * (target_scaled[2]/dist_t_escaled)
+            self.Ft[0] = self.Kt * dist_t * (target.x/dist_t)            #Same direction with Force magnitud
+            self.Ft[1] = self.Kt * dist_t * (target.y/dist_t)  
+            self.Ft[2] = self.Kt * dist_t * (target.z/dist_t)
 
 
 
@@ -359,7 +344,7 @@ class TurtlebotController():
 
 
         #Visualize vector in rviz:
-        self.marker_publish( self.result_position, [target.x, target.y, target.z], target_scaled, obs_matriz )
+        self.marker_publish( self.result_position, [target.x, target.y, target.z], self.Ft , obs_matriz )
 
         [v_lin,v_ang] = self.vector2vel_cmd(self.result_position)
 
@@ -372,38 +357,39 @@ class TurtlebotController():
         v_lin = self.Kv * vector[0]     #Tangencial velocity = X component of result vector 
                                   
         # Angle between resulting vector and robot frame (to calculate v ang.) 
-        vector_angle = math.atan2( vector[1] , vector[0])        # Rad. [-pi, pi]
+        vector_angle = math.atan2(vector[1] , vector[0])        # [-1,1]
 
-        #rospy.loginfo(f"Result angle = {vector_angle * 180/math.pi}")
+        #rospy.loginfo(f"Result angle = {vector_angle * 180/math.pi}")   
+
+        #Avoid sudden changes of sign around +-180º by keeping last direction  -  Implementation not finished
+        #if abs(vector_angle) > 1 - 0.1 :
+        #    if abs(vector_angle - self.result_angle_1) > 1:
+        #        vector_angle = self.result_angle_1
+        #        rospy.loginfo("Correcting +-180º singularity")
 
         self.debug_pub.publish(vector_angle)
 
-        # PD for angular velocity control
-        v_ang = self.Kw * ( vector_angle/math.pi + self.Kd * (vector_angle - self.result_angle_1) /( self.Tm * math.pi ) ) #rad/s
-        
+        #PD for angular velocity control
+        v_ang = self.Kw * (vector_angle/math.pi + self.Kd*(vector_angle - self.result_angle_1)/(self.Tm*math.pi) ) #rad/s
+
         #Saturation
-        if v_ang > self.vel_ang_max:
-            v_ang = self.vel_ang_max
+        if abs(v_ang) > self.vel_ang_max:
+            if v_ang > 0:
+                v_ang = self.vel_ang_max
+            else:
+                v_ang = - self.vel_ang_max
 
         if v_lin < 0:               #Forbiden going backwards 
             v_lin = 0.0
         if v_lin > self.vel_lin_max:             #Max velocity 
             v_lin = self.vel_lin_max
-        if v_lin < 0.05 and abs(v_ang) >= 0.1:            #If targer only a bit in front, use only ven ang to avoid doing spirals
+        if v_lin < 0.05 and abs(v_ang) >= 0.1:            #If targer only a bit in front, use only vel ang to avoid doing spirals
             v_lin = 0.0
 
         #Variable actualization
         self.result_angle_1 = vector_angle 
 
         return  [v_lin,v_ang]
-
-    #NOT NECESSARY BECAUSE ANGLE CALCULATED ALREADY IN [-180,180] RANGE
-    def normalize_ang_diff(self,ang1, ang2):
-        angle_diff = ang1 - ang2
-        angle_diff_norm = (angle_diff + 180)%360 - 180      #Rango garantizado [-180, 180]
-        #angle_diff_norm2 = angle_diff_norm/180              #Rango[-1,1]
-
-        return angle_diff_norm
 
     #Publish vectors to visualize 
     def marker_publish(self, Vector1, Vector2 , Vector3, Matriz):

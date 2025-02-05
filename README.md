@@ -7,5 +7,3 @@ Miguel Tejado Garcia
 
 Alvaro Perez-Borbujo Mohedo
  
-
-Hola?

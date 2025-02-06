@@ -11,16 +11,5 @@ Para lanzar el proyecto, dentro de la carpeta `catkin_ws`, sigan estos pasos:
     roslaunch challenge_evaluation robotics_challenge_reactive.launch
     ```
 
-2. Lanzar los nodos creados:
-    ```bash
-    roslaunch autonomous_navigation VFF.launch
-    ```
 
-En caso de que no les funcione el último `.launch`, ejecuten los siguientes comandos:
-
-```bash
-rosrun autonomous_navigation obstacles_detection.py
-rosrun autonomous_navigation robot_controller_A.py
-```
-
-Una vez lanzada la simulación y con los nodos funcionando, deberán añadir en RVIZ el topic "visualization_marker" que publica "MarkerArray" para visualizar los vectores del algoritmo VFF. Por último, usando "2D Nav Goal", añadan el punto al que deberá ir el robot para comprobar el funcionamiento.
+Una vez lanzada la simulación y con los nodos funcionando, deberán añadir en RVIZ el topic "visualization_marker" que publica "MarkerArray" para visualizar los vectores del algoritmo VFF.

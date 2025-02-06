@@ -1,4 +1,7 @@
 
+
+
+
 <launch>
 
     <!-- Robot initial position -->
@@ -17,14 +20,18 @@
     </include>
     
     <!-- Launch RViz -->
-	<node name="rviz" pkg="rviz" type="rviz" args="-d $(find challenge_evaluation)/config/robotics_challenge_reactive.rviz"/>
+    <node name="rviz" pkg="rviz" type="rviz" args="-d $(find challenge_evaluation)/config/robotics_challenge_reactive.rviz"/>
        
     <!-- Launch controller -->
-	<node name="robot_controller" pkg="autonomous_navigation" type="robot_controller_A.py" />
+    <node name="robot_controller" pkg="autonomous_navigation" type="robot_controller_A.py" />
+
+    <!-- Include evaluation_reactive.launch -->
+    <include file="$(find challenge_evaluation)/launch/evaluation_reactive.launch" />
+
+    <!-- Include evaluation_reactive.launch -->
+    <include file="$(find autonomous_navigation)/launch/path_publisher.launch" />
 
     <!--Launch obstacle's detector -->
-    	<node name="obstacle_detection" pkg="autonomous_navigation" type="obstacle_detection.py" />
+    <node name="obstacle_detection" pkg="autonomous_navigation" type="obstacle_detection.py" />
 
 </launch>
-
-

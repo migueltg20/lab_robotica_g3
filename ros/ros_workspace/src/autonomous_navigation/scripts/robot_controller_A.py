@@ -1,4 +1,4 @@
-#!/usr/bin/python3
+ #!/usr/bin/python3
 # This Python file uses the following encoding: utf-8
 
 import math
@@ -25,7 +25,7 @@ class TurtlebotController():
 
         # Subscribers 
         rospy.Subscriber("/move_base_simple/goal", geo.PoseStamped, self.goal_Callback)                 #Not compatible while following a path
-        rospy.Subscriber('/path', Path ,self.path_Callback)
+        rospy.Subscriber('/goals', Path ,self.path_Callback)
         rospy.Subscriber("/odom", Odometry, self.state_Callback)
         rospy.Subscriber("/obstacles", Vector3Array, self.obstacle_Callback)
 
@@ -55,7 +55,11 @@ class TurtlebotController():
 
         #State of robot
         self.pose_odom = geo.PoseStamped()
-  
+        self.pose_base = geo.PoseStamped()
+        self.position = geo.PointStamped()
+        self.orientation_qt = None
+        self.orientation_angle = 0.0
+
         #Controlador - virtual force field
         self.goal_transformed = geo.PoseStamped()
         self.Ft = [0,0,0]                           #Force vector towards goal
@@ -70,14 +74,13 @@ class TurtlebotController():
         self.obstacles = Vector3Array()
         self.num_obs = 0
         self.Kr = 0.1
-        self.max_Fr = 5.0
-        self.max_Fr_total = 20.0
- 
+        self.max_Fr = 4.0
+
         #Vector to linear and angular velocity
         self.vel_ang_max = 3.0
         self.vel_lin_max = 3.0
-        self.Kv = 1.0            #Proportional constant for linear velocity
-        self.Kw = 4            #Proportional constant for angular velocity [s^-1].      ~=vel_ang_max / max ang(=pi rad)  (= Force saturate signal)
+        self.Kv = 0.8       #1
+        self.Kw = 3.0        #4    #Proportional constant for angular velocity [s^-1].      ~=vel_ang_max / max ang(=pi rad)  (= Force saturate signal)
         self.Tm = 1/rate
         self.Kd = 0.75
         self.result_angle_1 = 0.0
@@ -205,6 +208,30 @@ class TurtlebotController():
         
         self.pose_odom.header.frame_id = "odom" 
         self.pose_odom.pose = odom_msg.pose.pose            #Pose - position and quaternion orientation
+        
+        try:            
+            self.pose_odom.header.stamp = rospy.Time(0)     #Try with last transform avaible
+            self.pose_base = self.tf_listener.transformPose('base_footprint', self.pose_odom)
+
+        #except (tf.LookupException, tf.ConnectivityException, tf.ExtrapolationException):
+        except Exception as e: 
+            #err = traceback.format_exc()
+            rospy.logerr(f"Problem TF : {e}")
+            
+        self.position = self.pose_odom.pose.position
+        self.orientation_qt = self.pose_odom.pose.orientation
+
+        #Convert orientation into a list 
+        quaternion = [self.orientation_qt.x , self.orientation_qt.y, self.orientation_qt.z, self.orientation_qt.w]
+        try:                                
+            #Transform form quaternion orientation to euler angles
+            orientation_angle_tuple = tf.transformations.euler_from_quaternion(quaternion)
+            self.orientation_angle = orientation_angle_tuple[2] * 180/math.pi   # euler angle yaw == z - degrees
+
+        except Exception as e:
+            err = traceback.format_exc()
+            rospy.logwarn(f"Problem TF in State Callback qt to euler transformation: {err}")
+
 
     def obstacle_Callback(self,obs_msg):
         ''' Recibe obstacles' positions refered to 'base_footprint' frame as a array of 'geo.Vector3' messages'''
@@ -249,12 +276,15 @@ class TurtlebotController():
         self.Ft[2] = self.Kt * (target.z/dist_t)
 
         #Decrease force close to goal to allow full stop in final goal
-        if self.final_goal == True and dist_t < self.Min_dist_t:                
-            self.Ft[0] = self.Ft[0] * dist_t             #Same direction with Force magnitud
-            self.Ft[1] = self.Ft[1] * dist_t  
-            self.Ft[2] = self.Ft[2] * dist_t 
+        #if self.final_goal == True and dist_t < self.Min_dist_t:                
+        #    self.Ft[0] = self.Kt * dist_t * (target.x/dist_t)            #Same direction with Force magnitud
+        #    self.Ft[1] = self.Kt * dist_t * (target.y/dist_t)  
+        #    self.Ft[2] = self.Kt * dist_t * (target.z/dist_t)
+
+
 
         #---Obstacles vector------------------
+
         obs_matriz = np.zeros((self.num_obs, 3))      # Matrix with the normalized vectors
         obs_dist = np.zeros(self.num_obs)             # Distances to obstacles
         F = np.zeros((self.num_obs, 3))               # Repulsive force for each obstacle
@@ -275,10 +305,7 @@ class TurtlebotController():
                     F[i] = self.max_Fr * obs_matriz[i]
 
         #Total repulsive force is the sum of all obstacles forces
-        self.Fr  = np.sum(F , axis=0)
-        
-        if np.linalg.norm(self.Fr) > self.max_Fr_total:
-            self.Fr = self.max_Fr_total * self.Fr/abs(self.Fr)
+        self.Fr  = np.sum(F, axis=0)
 
         #---Result vector---------------------
         self.result_position[0] = self.Ft[0]  +  self.Fr[0] 
@@ -302,15 +329,15 @@ class TurtlebotController():
         v_lin = self.Kv * vector[0]     #Tangencial velocity = X component of result vector 
                                   
         # Angle between resulting vector and robot frame (to calculate v ang.) 
-        vector_angle = math.atan2(vector[1] , vector[0])        # [-pi,pi]
-
-        #Aovid singularity
-        if vector_angle > np.pi:
-            vector_angle -= 2 * np.pi
-        elif vector_angle < -np.pi:
-            vector_angle += 2 * np.pi
+        vector_angle = math.atan2(vector[1] , vector[0])        # [-1,1]
 
         #rospy.loginfo(f"Result angle = {vector_angle * 180/math.pi}")   
+
+        #Avoid sudden changes of sign around +-180º by keeping last direction  -  Implementation not finished
+        #if abs(vector_angle) > 1 - 0.1 :
+        #    if abs(vector_angle - self.result_angle_1) > 1:
+        #        vector_angle = self.result_angle_1
+        #        rospy.loginfo("Correcting +-180º singularity")
 
         self.debug_pub.publish(vector_angle)
 
@@ -324,17 +351,11 @@ class TurtlebotController():
             else:
                 v_ang = - self.vel_ang_max
 
+        if v_lin < 0:               #Forbiden going backwards 
+            v_lin = 0.0
         if v_lin > self.vel_lin_max:             #Max velocity 
             v_lin = self.vel_lin_max
-
-        #Forbiden going backwards except extreme situation for security 
-        if vector[0] < 0:
-            v_lin = 0.0
-            if vector[0] < - 10 :         
-                v_lin = -0.2
-        
-        #If targer only a bit in front, use only vel ang to avoid doing spirals
-        if v_lin < 0.05 and abs(v_ang) >= 0.1:            
+        if v_lin < 0.05 and abs(v_ang) >= 0.1:            #If targer only a bit in front, use only vel ang to avoid doing spirals
             v_lin = 0.0
 
         #Variable actualization
